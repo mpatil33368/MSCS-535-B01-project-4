@@ -1,0 +1,49 @@
+function secure_resolve(hostname):
+    if USE_DOH_OR_DOT:
+        return doh_resolve(hostname)    // reduces DNS MITM
+    else:
+        return system_resolve(hostname) // accept higher risk if DoH/DoT not available
+
+function init_client_tls_context(hostname):
+    ctx = new TLSContext()
+    ctx.min_version = TLS1_3
+    ctx.max_version = TLS1_3
+    ctx.cipher_suites = STRONG_DEFAULTS_ONLY
+    ctx.alpn = ["h2", "http/1.1"]
+    ctx.trust_store = load_system_or_custom_trust_store()
+    ctx.enable_ocsp_stapling_check = true
+    ctx.require_scts = true             // if supported for CT
+    ctx.expected_hostname = hostname    // must match SAN/CN
+
+    // Certificate pinning: SPKI hashes or exact public keys (rotate safely)
+    ctx.pinset = [
+        "sha256/SPKI_HASH_PRIMARY",
+        "sha256/SPKI_HASH_BACKUP"       // allow second pin for rotations
+    ]
+    return ctx
+
+function connect_secure(hostname, port):
+    addr = secure_resolve(hostname)
+    tcp = tcp_connect(addr, port, timeout=10s)
+
+    ctx = init_client_tls_context(hostname)
+    tls_conn = ctx.client_handshake(tcp)
+
+    // Mandatory checks
+    if not tls_conn.verify_certificate_chain():
+        abort("CERT_CHAIN_INVALID")     // stops MITM with self-signed or re-signed chains
+    if not tls_conn.verify_hostname(hostname):
+        abort("HOSTNAME_MISMATCH")
+    if not tls_conn.verify_ocsp_staple():
+        abort("OCSP_INVALID_OR_MISSING")
+    if not tls_conn.verify_scts():
+        abort("CT_MISSING_OR_INVALID")
+
+    // Pinning (final gate)
+    if not tls_conn.verify_pinset(ctx.pinset):
+        abort("PIN_MISMATCH")           // strong MITM defense
+
+    // Optional: channel binding exporter for app tokens
+    exporter_secret = tls_conn.export_keying_material(label="EXPORTER-CHANNEL-BIND", context="", length=32)
+
+    return (tls_conn, exporter_secret)
