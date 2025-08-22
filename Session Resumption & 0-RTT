@@ -1,0 +1,7 @@
+// Server: allow session tickets, rotate keys frequently (already set)
+// Client: cache session tickets securely
+
+// If enabling 0-RTT (TLS1.3 early data) — DISABLE by default.
+// If you must enable it, only permit idempotent endpoints (e.g., GET),
+// and enforce the same nonce/timestamp replay checks above.
+ENABLE_EARLY_DATA = false
