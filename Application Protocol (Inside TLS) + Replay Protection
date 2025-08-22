@@ -1,0 +1,41 @@
+// Client request with channel-bound auth and replay defense
+function client_send_request(tls_conn, exporter_secret, method, path, body):
+    nonce = secure_random_bytes(16)
+    ts = current_time_utc()
+
+    auth_token = HMAC(exporter_secret, concat(method, path, ts, nonce, hash(body)))
+
+    request = {
+        "method": method,
+        "path": path,
+        "headers": {
+            "X-Timestamp": ts,
+            "X-Nonce": base64(nonce),
+            "X-Auth": base64(auth_token)
+        },
+        "body": body
+    }
+    tls_conn.write(serialize(request))
+
+function server_receive_request(tls_conn, request):
+    // Enforce tight clock skew window (e.g., ±60s)
+    if not within_skew(request.headers["X-Timestamp"], 60s):
+        return reject(401, "STALE_TIMESTAMP")
+
+    // Replay cache (nonce + ts) in fast store (e.g., Redis) for ~5 minutes
+    if replay_cache_seen(request.headers["X-Nonce"]):
+        return reject(409, "REPLAY_DETECTED")
+    replay_cache_store(request.headers["X-Nonce"], ttl=5m)
+
+    // Recompute channel-binding with exporter key from the session
+    exporter_secret = tls_conn.export_keying_material("EXPORTER-CHANNEL-BIND", "", 32)
+
+    expected = HMAC(exporter_secret, concat(request.method, request.path,
+                                            request.headers["X-Timestamp"],
+                                            base64_decode(request.headers["X-Nonce"]),
+                                            hash(request.body)))
+    if request.headers["X-Auth"] != base64(expected):
+        return reject(401, "BAD_AUTH")
+
+    // Process request safely (authorization, input validation, etc.)
+    return handle_application_logic(request)
