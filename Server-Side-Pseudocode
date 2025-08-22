@@ -1,0 +1,53 @@
+function init_server_tls_context():
+    tls_ctx = new TLSContext()
+    tls_ctx.min_version = TLS1_3
+    tls_ctx.max_version = TLS1_3
+    tls_ctx.cipher_suites = STRONG_DEFAULTS_ONLY   // e.g., TLS_AES_128_GCM_SHA256, TLS_AES_256_GCM_SHA384
+    tls_ctx.curves = [X25519, secp256r1]
+    tls_ctx.session_tickets.enabled = true
+    tls_ctx.session_tickets.rotate_keys_via_KMS(interval=24h)
+    tls_ctx.renegotiation = DISABLED
+    tls_ctx.alpn = ["h2", "http/1.1"]
+    tls_ctx.hsts_enabled = true
+    tls_ctx.hsts_max_age = 31536000     // 1 year; includeSubDomains, preload as policy allows
+    tls_ctx.staple_ocsp_response(load_ocsp_from_ca_cache())
+    tls_ctx.require_scts = true         // if platform supports CT checking
+
+    // mTLS optional: require client certificates for high-risk endpoints
+    if REQUIRE_MTLS:
+        tls_ctx.client_auth = REQUIRE
+        tls_ctx.client_trust_store = load_client_ca_bundle()
+
+    tls_ctx.server_cert_chain = load_cert_chain("/secure/certs/fullchain.pem")
+    tls_ctx.server_private_key = load_private_key("/secure/keys/server.key") // from HSM/KMS if possible
+    return tls_ctx
+
+function start_server():
+    tls_ctx = init_server_tls_context()
+    listener = tls_listen(address="0.0.0.0:443", tls_ctx)
+
+    while true:
+        conn = listener.accept()
+        spawn handle_connection(conn)
+
+function handle_connection(tls_conn):
+    // Optional: verify client cert if mTLS
+    if REQUIRE_MTLS:
+        client_cert = tls_conn.get_peer_certificate()
+        if not validate_client_cert(client_cert):
+            tls_conn.close(reason="invalid client cert")
+            return
+
+    // Log negotiated TLS parameters for auditing
+    log_tls_details(tls_conn)
+
+    // Application protocol (e.g., HTTPS/HTTP2/your RPC) runs inside TLS
+    app_loop(tls_conn)
+
+// Utility
+function validate_client_cert(cert):
+    return (
+        cert.not_expired() AND
+        cert.chain_validates_against_trust_store() AND
+        cert.not_revoked() // via OCSP/CRL if available
+    )
